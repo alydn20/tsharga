@@ -164,6 +164,11 @@ const PROMO_CHECK_INTERVAL = 1000 // Cek setiap 1 detik (real-time)
 // ⚡ CACHED PROMO STATUS (untuk ditampilkan di pesan harga)
 let cachedPromoStatus = null // 'ON' atau 'OFF'
 
+// 📌 PROMO BROADCAST STATE (untuk smart broadcast logic)
+let lastPromoStatusBroadcast = null // Status terakhir yang di-broadcast
+let lastPromoBroadcastTime = 0 // Timestamp broadcast terakhir
+const PROMO_BROADCAST_COOLDOWN = 60000 // 1 menit cooldown
+
 // ⚡ CACHE GLOBAL untuk market data (pre-fetched)
 let cachedMarketData = {
   usdIdr: null, // null = belum ada data, tampilkan "-"
@@ -1216,11 +1221,11 @@ async function fetchNominalPromo(retryCount = 0) {
   }
 }
 
-// 🎁 PROMO STATUS CHECK + ALERT saat OFF → ON
+// 🎁 PROMO STATUS CHECK dengan smart broadcast logic
 let isPromoChecking = false
 let promoCheckCount = 0
 
-async function doPromoBroadcast() {
+async function updatePromoStatus() {
   if (!sock || !isReady) return
   if (isPromoChecking) return
   isPromoChecking = true
@@ -1244,79 +1249,111 @@ async function doPromoBroadcast() {
       currentStatus = has20jt ? 'ON' : 'OFF'
     }
 
-    // Detect OFF → ON
-    const statusChangedToOn = cachedPromoStatus !== null && cachedPromoStatus === 'OFF' && currentStatus === 'ON'
-    const statusChanged = cachedPromoStatus !== null && cachedPromoStatus !== currentStatus
-
-    if (statusChanged) {
-      pushLog(`🎁 Status: ${cachedPromoStatus} → ${currentStatus}`)
-    }
-
-    // Update status dulu sebelum kirim pesan
+    // Update cache dulu
+    const oldCachedStatus = cachedPromoStatus
     cachedPromoStatus = currentStatus
 
-    // 🚨 ALERT saat OFF → ON: Kirim pesan harga (TANPA @mention untuk hindari spam detection)
-    if (statusChangedToOn && subscriptions.size > 0) {
-      pushLog(`🚨 PROMO ON! Sending price message to ${subscriptions.size} subscribers...`)
+    // 🎯 SMART BROADCAST LOGIC:
+    // Hanya broadcast jika:
+    // 1. Status BERUBAH dari broadcast terakhir (ON→OFF atau OFF→ON)
+    // 2. Sudah lewat cooldown 1 menit (cegah spam ON→OFF→ON)
+    const statusChanged = lastPromoStatusBroadcast !== currentStatus
+    const cooldownPassed = (Date.now() - lastPromoBroadcastTime) >= PROMO_BROADCAST_COOLDOWN
 
-      try {
-        // Fetch harga terkini untuk pesan
-        const treasuryData = await fetchTreasury()
-        const usdRate = cachedMarketData.usdIdr?.rate || null
+    if (statusChanged && cooldownPassed && subscriptions.size > 0) {
+      pushLog(`🎁 Status CHANGED: ${lastPromoStatusBroadcast || 'unknown'} → ${currentStatus}`)
 
-        // Format pesan harga dengan status ON
-        const message = formatMessage(
-          treasuryData,
-          usdRate,
-          cachedMarketData.xauUsd,
-          null, // no price change
-          cachedMarketData.economicEvents,
-          currentStatus // 'ON'
-        )
+      // Broadcast promo change dengan PIN
+      await broadcastPromoChange(currentStatus)
 
-        const messageHash = getMessageHash(message)
-
-        let sentCount = 0
-        let skippedCount = 0
-
-        for (const chatId of subscriptions) {
-          // Check deduplication cache
-          const cached = messageCache.get(chatId)
-          if (cached && cached.hash === messageHash && (Date.now() - cached.timestamp) < MESSAGE_CACHE_TTL) {
-            skippedCount++
-            pushLog(`⏭️  Promo: Skipped duplicate to ${chatId.substring(0, 15)}`)
-            continue
-          }
-
-          try {
-            // AWAIT untuk ensure message terkirim
-            const sendTime = Date.now()
-            await sock.sendMessage(chatId, { text: message })
-            const sendDuration = Date.now() - sendTime
-
-            // Update cache setelah berhasil kirim
-            messageCache.set(chatId, {
-              hash: messageHash,
-              timestamp: Date.now()
-            })
-
-            sentCount++
-            pushLog(`📢 Promo: Sent to ${chatId.substring(0, 15)} (${sendDuration}ms)`)
-          } catch (e) {
-            pushLog(`❌ Promo: Failed to ${chatId}: ${e.message}`)
-          }
-        }
-
-        pushLog(`🚨 Promo ON broadcast done! (sent: ${sentCount}, skipped: ${skippedCount})`)
-      } catch (e) {
-        pushLog(`❌ Failed to fetch price for alert: ${e.message}`)
-      }
+      // Update state
+      lastPromoStatusBroadcast = currentStatus
+      lastPromoBroadcastTime = Date.now()
+    } else if (statusChanged && !cooldownPassed) {
+      const remainingSeconds = Math.ceil((PROMO_BROADCAST_COOLDOWN - (Date.now() - lastPromoBroadcastTime)) / 1000)
+      pushLog(`🎁 Status changed: ${oldCachedStatus} → ${currentStatus} (cooldown: ${remainingSeconds}s remaining)`)
     }
 
   } catch (e) {
     // Silent fail
   } finally {
     isPromoChecking = false
+  }
+}
+
+// 📌 Broadcast promo change dengan auto-PIN di grup
+async function broadcastPromoChange(promoStatus) {
+  if (!sock || !isReady || subscriptions.size === 0) return
+
+  try {
+    // Fetch harga terkini untuk pesan
+    const treasuryData = await fetchTreasury()
+    const usdRate = cachedMarketData.usdIdr?.rate || null
+
+    // Format pesan promo change
+    const message = formatMessage(
+      treasuryData,
+      usdRate,
+      cachedMarketData.xauUsd,
+      null, // no price change
+      cachedMarketData.economicEvents,
+      promoStatus
+    )
+
+    const messageHash = getMessageHash(message)
+
+    let sentCount = 0
+    let pinnedCount = 0
+    let skippedCount = 0
+
+    pushLog(`📌 Broadcasting promo ${promoStatus} to ${subscriptions.size} subs...`)
+
+    for (const chatId of subscriptions) {
+      // Check deduplication cache
+      const cached = messageCache.get(chatId)
+      if (cached && cached.hash === messageHash && (Date.now() - cached.timestamp) < MESSAGE_CACHE_TTL) {
+        skippedCount++
+        continue
+      }
+
+      try {
+        // Send message
+        const sendTime = Date.now()
+        const sentMsg = await sock.sendMessage(chatId, { text: message })
+        const sendDuration = Date.now() - sendTime
+
+        // Update cache
+        messageCache.set(chatId, {
+          hash: messageHash,
+          timestamp: Date.now()
+        })
+
+        sentCount++
+
+        // 📌 Auto-PIN jika GRUP
+        if (chatId.endsWith('@g.us')) {
+          try {
+            await sock.sendMessage(chatId, {
+              pin: sentMsg.key
+            })
+            pinnedCount++
+            pushLog(`📌 Pinned promo ${promoStatus} in group ${chatId.substring(0, 20)} (${sendDuration}ms)`)
+          } catch (pinErr) {
+            pushLog(`⚠️  Pin failed in ${chatId.substring(0, 20)}: ${pinErr.message}`)
+          }
+        } else {
+          pushLog(`✅ Sent promo ${promoStatus} to ${chatId.substring(0, 15)} (${sendDuration}ms)`)
+        }
+
+      } catch (e) {
+        pushLog(`❌ Failed to send to ${chatId.substring(0, 15)}: ${e.message}`)
+      }
+    }
+
+    pushLog(`📌 Promo broadcast done! (sent: ${sentCount}, pinned: ${pinnedCount}, skipped: ${skippedCount})`)
+
+  } catch (e) {
+    pushLog(`❌ Promo broadcast error: ${e.message}`)
   }
 }
 
@@ -1362,11 +1399,11 @@ async function doBroadcast(priceChange, priceData) {
 
     const usdRate = cachedMarketData.usdIdr?.rate || null
 
-    // Semua subscriber otomatis dapat status promo
+    // Gunakan cached promo status (updated setiap 1 detik)
     const message = formatMessage(treasuryData, usdRate, cachedMarketData.xauUsd, priceChange, cachedMarketData.economicEvents, cachedPromoStatus)
     const messageHash = getMessageHash(message)
 
-    pushLog(`📤 [#${currentBroadcastId}] Sending to ${subscriptions.size} subs...`)
+    pushLog(`📤 [#${currentBroadcastId}] Sending to ${subscriptions.size} subs... (promo: ${cachedPromoStatus || '-'})`)
 
     // Send with deduplication and await for acknowledgement
     let sentCount = 0
@@ -1419,7 +1456,9 @@ async function checkPriceUpdate() {
   if (!isReady || subscriptions.size === 0) return
 
   try {
+    // ⚡ FAST PRICE FETCH - Tidak tunggu promo (promo updated di background)
     const treasuryData = await fetchTreasury()
+
     const currentPrice = {
       buy: treasuryData?.data?.buying_rate,
       sell: treasuryData?.data?.selling_rate,
@@ -1600,6 +1639,7 @@ async function checkPriceUpdate() {
     }
     
     // ULTRA INSTANT BROADCAST - Fire immediately without any validation
+    // Promo status dari cache (updated setiap 1 detik di background)
     setImmediate(() => {
       doBroadcast(finalPriceChange, currentPrice).catch(e => {
         pushLog(`❌ Broadcast promise error: ${e.message}`)
@@ -1612,10 +1652,13 @@ async function checkPriceUpdate() {
 }
 
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
-setInterval(doPromoBroadcast, PROMO_CHECK_INTERVAL) // Cek promo setiap 1 detik
+setInterval(updatePromoStatus, PROMO_CHECK_INTERVAL) // Update cache promo setiap 1 detik
 
-console.log(`✅ Broadcast: 50s cooldown OR new minute OR stale price (5m+)`)
-console.log(`🎁 Promo: cek setiap 1s, status ON/OFF otomatis di pesan harga`)
+console.log(`\n🎯 BROADCAST SYSTEM:`)
+console.log(`✅ Price broadcast: FAST (50s cooldown OR new minute OR stale 5m+)`)
+console.log(`📌 Promo broadcast: SEPARATED (hanya saat status BERUBAH + 1min cooldown)`)
+console.log(`🔒 Promo logic: ON→OFF atau OFF→ON (prevent spam ON→OFF→ON)`)
+console.log(`📍 Auto-PIN: Promo broadcast di-PIN otomatis di grup\n`)
 console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s (ULTRA REAL-TIME!)`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`⏱️  Stale price threshold: ${STALE_PRICE_THRESHOLD/60000} minutes`)

@@ -1018,13 +1018,8 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
     timeSection = `${dayName} ${hours}:${minutes}:${seconds} WIB`
   }
 
-  // Promo status di samping waktu (icon berbeda dari status harga)
-  let promoSection = ''
-  if (promoStatus === 'ON') {
-    promoSection = ' 🟢 ON'
-  } else if (promoStatus === 'OFF') {
-    promoSection = ' 🔴 OFF'
-  }
+  // Promo status TIDAK ditampilkan di price broadcast
+  // Promo akan muncul di pesan terpisah yang di-PIN
 
   let headerSection = ''
   if (priceChange && priceChange.buyChange !== 0) {
@@ -1066,7 +1061,7 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   // Format gram dengan 4 digit desimal
   const formatGrams = (g) => g.toFixed(4)
 
-  return `${headerSection}${timeSection}${promoSection}${statusSection}
+  return `${headerSection}${timeSection}${statusSection}
 
 💰 Beli ${buyFormatted} | Jual ${sellFormatted} (${spreadPercent > 0 ? '-' : ''}${spreadPercent}%)
 ${marketSection}

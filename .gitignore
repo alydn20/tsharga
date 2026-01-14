@@ -1,0 +1,12 @@
+node_modules
+.env
+npm-debug.log*
+.DS_Store
+baileys-session/
+auth_info_baileys/
+auth/
+token.txt
+bot.lock
+.claude/
+.wwebjs_cache/
+*.png

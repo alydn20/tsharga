@@ -1222,8 +1222,14 @@ let isPromoChecking = false
 let promoCheckCount = 0
 
 async function updatePromoStatus() {
-  if (!sock || !isReady) return
-  if (isPromoChecking) return
+  if (!sock || !isReady) {
+    pushLog(`⏭️  Promo check skipped: sock=${!!sock}, ready=${isReady}`)
+    return
+  }
+  if (isPromoChecking) {
+    pushLog(`⏭️  Promo check skipped: already checking`)
+    return
+  }
   isPromoChecking = true
 
   promoCheckCount++
@@ -1234,7 +1240,11 @@ async function updatePromoStatus() {
   }
 
   try {
-    const nominalData = await fetchNominalPromo().catch(() => null)
+    pushLog(`🔍 [Promo Check #${promoCheckCount}] Fetching promo data...`)
+    const nominalData = await fetchNominalPromo().catch((err) => {
+      pushLog(`❌ [Promo Check #${promoCheckCount}] Fetch error: ${err.message}`)
+      return null
+    })
 
     let currentStatus = 'OFF'
     if (nominalData) {
@@ -1243,11 +1253,15 @@ async function updatePromoStatus() {
         (n.promotion_amount === 19315000 || n.default_amount === 20000000)
       )
       currentStatus = has20jt ? 'ON' : 'OFF'
+      pushLog(`✅ [Promo Check #${promoCheckCount}] API response: ${currentStatus}`)
+    } else {
+      pushLog(`⚠️  [Promo Check #${promoCheckCount}] No data, defaulting to OFF`)
     }
 
     // Update cache dulu
     const oldCachedStatus = cachedPromoStatus
     cachedPromoStatus = currentStatus
+    pushLog(`📝 [Promo Check #${promoCheckCount}] Cache updated: ${oldCachedStatus} → ${currentStatus}`)
 
     // 🎯 SMART BROADCAST LOGIC:
     // Hanya broadcast jika:
@@ -1257,7 +1271,7 @@ async function updatePromoStatus() {
 
     // Skip initial promo broadcast saat bot baru start
     if (isInitialPromoCheck) {
-      pushLog(`🎁 Initial promo status: ${currentStatus} (skip broadcast)`)
+      pushLog(`🎁 [Promo Check #${promoCheckCount}] Initial promo status: ${currentStatus} (skip broadcast)`)
       lastPromoStatusBroadcast = currentStatus
       isInitialPromoCheck = false
       return // Skip broadcast
@@ -1266,8 +1280,11 @@ async function updatePromoStatus() {
     const statusChanged = lastPromoStatusBroadcast !== currentStatus
     const cooldownPassed = (Date.now() - lastPromoBroadcastTime) >= PROMO_BROADCAST_COOLDOWN
 
+    pushLog(`🔍 [Promo Check #${promoCheckCount}] Broadcast logic: statusChanged=${statusChanged}, cooldownPassed=${cooldownPassed}, subs=${subscriptions.size}`)
+    pushLog(`   lastBroadcast="${lastPromoStatusBroadcast}", current="${currentStatus}"`)
+
     if (statusChanged && cooldownPassed && subscriptions.size > 0) {
-      pushLog(`🎁 Status CHANGED: ${lastPromoStatusBroadcast || 'unknown'} → ${currentStatus}`)
+      pushLog(`🎁 [Promo Check #${promoCheckCount}] ✅ BROADCAST TRIGGERED: ${lastPromoStatusBroadcast || 'unknown'} → ${currentStatus}`)
 
       // Broadcast promo change dengan PIN
       await broadcastPromoChange(currentStatus)
@@ -1275,13 +1292,18 @@ async function updatePromoStatus() {
       // Update state
       lastPromoStatusBroadcast = currentStatus
       lastPromoBroadcastTime = Date.now()
+      pushLog(`📝 [Promo Check #${promoCheckCount}] State updated: lastBroadcast="${lastPromoStatusBroadcast}", time=${new Date(lastPromoBroadcastTime).toISOString()}`)
     } else if (statusChanged && !cooldownPassed) {
       const remainingSeconds = Math.ceil((PROMO_BROADCAST_COOLDOWN - (Date.now() - lastPromoBroadcastTime)) / 1000)
-      pushLog(`🎁 Status changed: ${oldCachedStatus} → ${currentStatus} (cooldown: ${remainingSeconds}s remaining)`)
+      pushLog(`🎁 [Promo Check #${promoCheckCount}] ⏳ Status changed: ${oldCachedStatus} → ${currentStatus} (cooldown: ${remainingSeconds}s remaining)`)
+    } else if (!statusChanged) {
+      pushLog(`🎁 [Promo Check #${promoCheckCount}] ⏭️  Status unchanged: ${currentStatus}`)
+    } else if (subscriptions.size === 0) {
+      pushLog(`🎁 [Promo Check #${promoCheckCount}] ⏭️  No subscribers`)
     }
 
   } catch (e) {
-    // Silent fail
+    pushLog(`❌ [Promo Check #${promoCheckCount}] Exception: ${e.message}`)
   } finally {
     isPromoChecking = false
   }
@@ -1909,20 +1931,51 @@ async function start() {
         const sendTarget = msg.key.remoteJid
         
         if (/\baktif\b/.test(text)) {
-          pushLog(`📥 CMD aktif from: ${sendTarget.substring(0, 15)}, already subscribed: ${subscriptions.has(sendTarget)}`)
-          if (subscriptions.has(sendTarget)) {
+          const isAlreadySubscribed = subscriptions.has(sendTarget)
+          pushLog(`📥 CMD aktif from: ${sendTarget.substring(0, 15)}, already subscribed: ${isAlreadySubscribed}`)
+
+          if (isAlreadySubscribed) {
             await sock.sendMessage(sendTarget, {
               text: '✅ Sudah aktif!'
             }, { quoted: msg })
             pushLog(`✅ Sent "Sudah aktif" reply`)
           } else {
+            // New subscriber!
             subscriptions.add(sendTarget)
-            promoSubscriptions.add(sendTarget) // Otomatis include status promo
+            promoSubscriptions.add(sendTarget)
             pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
 
+            // Send activation message
             await sock.sendMessage(sendTarget, {
               text: '🎉 Berhasil Diaktifkan!'
             }, { quoted: msg })
+            pushLog(`✅ Sent activation confirmation to ${sendTarget.substring(0, 15)}`)
+
+            // 🎁 Kirim status promo saat ini untuk user baru
+            if (cachedPromoStatus) {
+              pushLog(`📌 Sending initial promo status to new subscriber: ${cachedPromoStatus}`)
+
+              try {
+                const promoMessage = formatPromoMessage(cachedPromoStatus)
+                const sentMsg = await sock.sendMessage(sendTarget, { text: promoMessage })
+                pushLog(`✅ Sent initial promo status "${cachedPromoStatus}" to ${sendTarget.substring(0, 15)}`)
+
+                // 📌 Auto-PIN jika GRUP
+                if (sendTarget.endsWith('@g.us')) {
+                  try {
+                    await new Promise(r => setTimeout(r, 500))
+                    await sock.sendMessage(sendTarget, { pin: sentMsg.key })
+                    pushLog(`📌 Pinned initial promo status in group ${sendTarget.substring(0, 20)}`)
+                  } catch (pinErr) {
+                    pushLog(`⚠️  Initial pin failed: ${pinErr.message}`)
+                  }
+                }
+              } catch (err) {
+                pushLog(`❌ Failed to send initial promo status: ${err.message}`)
+              }
+            } else {
+              pushLog(`⚠️  No cached promo status yet, skip initial promo send`)
+            }
           }
           continue
         }

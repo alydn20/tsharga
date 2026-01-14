@@ -1292,67 +1292,10 @@ async function updatePromoStatus() {
   }
 }
 
-// 🎁 Format pesan khusus untuk promo broadcast (BERBEDA dari price broadcast)
-function formatPromoMessage(promoStatus, treasuryData, usdRate, xauUsd, economicEvents) {
-  const buy = treasuryData?.data?.buying_rate || 0
-  const sell = treasuryData?.data?.selling_rate || 0
-
-  const buyFormatted = `Rp${formatRupiah(buy)}/gr`
-  const sellFormatted = `Rp${formatRupiah(sell)}/gr`
-
-  const updatedAt = treasuryData?.data?.updated_at
-  let timeSection = ''
-  if (updatedAt) {
-    const date = new Date(updatedAt)
-    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
-    const dayName = days[date.getDay()]
-    const hours = date.getHours().toString().padStart(2, '0')
-    const minutes = date.getMinutes().toString().padStart(2, '0')
-    const seconds = date.getSeconds().toString().padStart(2, '0')
-    timeSection = `${dayName} ${hours}:${minutes}:${seconds} WIB`
-  }
-
-  // Header besar untuk promo
-  let headerSection = ''
-  if (promoStatus === 'ON') {
-    headerSection = `🎉🎉🎉 PROMO AKTIF! 🎉🎉🎉\n\n`
-  } else {
-    headerSection = `⚠️ PROMO TIDAK AKTIF ⚠️\n\n`
-  }
-
-  let marketSection = usdRate
-    ? `💱 USD Rp${formatRupiah(Math.round(usdRate))}`
-    : `💱 USD -`
-
-  if (xauUsd) {
-    marketSection += ` | XAU $${xauUsd.toFixed(2)}`
-  }
-
-  const calendarSection = formatEconomicCalendar(economicEvents)
-
-  const grams20M = calculateProfit(buy, sell, 20000000).totalGrams
-  const profit20M = calculateProfit(buy, sell, 20000000).profit
-  const grams30M = calculateProfit(buy, sell, 30000000).totalGrams
-  const profit30M = calculateProfit(buy, sell, 30000000).profit
-  const grams40M = calculateProfit(buy, sell, 40000000).totalGrams
-  const profit40M = calculateProfit(buy, sell, 40000000).profit
-  const grams50M = calculateProfit(buy, sell, 50000000).totalGrams
-  const profit50M = calculateProfit(buy, sell, 50000000).profit
-
-  const formatGrams = (g) => g.toFixed(4)
-
-  return `${headerSection}${timeSection} ${promoStatus === 'ON' ? '🟢 ON' : '🔴 OFF'}
-
-💰 Beli ${buyFormatted} | Jual ${sellFormatted}
-${marketSection}
-
-🎁 20jt→${formatGrams(grams20M)}gr (+Rp${formatRupiah(Math.round(profit20M))})
-🎁 30jt→${formatGrams(grams30M)}gr (+Rp${formatRupiah(Math.round(profit30M))})
-🎁 40jt→${formatGrams(grams40M)}gr (+Rp${formatRupiah(Math.round(profit40M))})
-🎁 50jt→${formatGrams(grams50M)}gr (+Rp${formatRupiah(Math.round(profit50M))})
-${calendarSection}
-⚡ Status promo berubah!
-🌐 Via website: https://ts.muhamadaliyudin.xyz/`
+// 🎁 Format pesan khusus untuk promo broadcast (ULTRA SIMPLE - hanya emoji + status)
+function formatPromoMessage(promoStatus) {
+  // HANYA 🟢 ON atau 🔴 OFF
+  return promoStatus === 'ON' ? '🟢 ON' : '🔴 OFF'
 }
 
 // 📌 Broadcast promo change dengan auto-PIN di grup
@@ -1360,18 +1303,8 @@ async function broadcastPromoChange(promoStatus) {
   if (!sock || !isReady || subscriptions.size === 0) return
 
   try {
-    // Fetch harga terkini untuk pesan
-    const treasuryData = await fetchTreasury()
-    const usdRate = cachedMarketData.usdIdr?.rate || null
-
-    // Format pesan promo change (FORMAT BERBEDA dari price broadcast!)
-    const message = formatPromoMessage(
-      promoStatus,
-      treasuryData,
-      usdRate,
-      cachedMarketData.xauUsd,
-      cachedMarketData.economicEvents
-    )
+    // Format pesan promo change (SUPER SIMPLE - hanya status ON/OFF)
+    const message = formatPromoMessage(promoStatus)
 
     const messageHash = getMessageHash(message)
 

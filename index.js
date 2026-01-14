@@ -168,6 +168,7 @@ let cachedPromoStatus = null // 'ON' atau 'OFF'
 let lastPromoStatusBroadcast = null // Status terakhir yang di-broadcast
 let lastPromoBroadcastTime = 0 // Timestamp broadcast terakhir
 const PROMO_BROADCAST_COOLDOWN = 60000 // 1 menit cooldown
+let isInitialPromoCheck = true // Flag untuk skip initial broadcast
 
 // ⚡ CACHE GLOBAL untuk market data (pre-fetched)
 let cachedMarketData = {
@@ -1255,8 +1256,18 @@ async function updatePromoStatus() {
 
     // 🎯 SMART BROADCAST LOGIC:
     // Hanya broadcast jika:
-    // 1. Status BERUBAH dari broadcast terakhir (ON→OFF atau OFF→ON)
-    // 2. Sudah lewat cooldown 1 menit (cegah spam ON→OFF→ON)
+    // 1. BUKAN initial check (skip broadcast pertama kali bot start)
+    // 2. Status BERUBAH dari broadcast terakhir (ON→OFF atau OFF→ON)
+    // 3. Sudah lewat cooldown 1 menit (cegah spam ON→OFF→ON)
+
+    // Skip initial promo broadcast saat bot baru start
+    if (isInitialPromoCheck) {
+      pushLog(`🎁 Initial promo status: ${currentStatus} (skip broadcast)`)
+      lastPromoStatusBroadcast = currentStatus
+      isInitialPromoCheck = false
+      return // Skip broadcast
+    }
+
     const statusChanged = lastPromoStatusBroadcast !== currentStatus
     const cooldownPassed = (Date.now() - lastPromoBroadcastTime) >= PROMO_BROADCAST_COOLDOWN
 
@@ -1281,6 +1292,69 @@ async function updatePromoStatus() {
   }
 }
 
+// 🎁 Format pesan khusus untuk promo broadcast (BERBEDA dari price broadcast)
+function formatPromoMessage(promoStatus, treasuryData, usdRate, xauUsd, economicEvents) {
+  const buy = treasuryData?.data?.buying_rate || 0
+  const sell = treasuryData?.data?.selling_rate || 0
+
+  const buyFormatted = `Rp${formatRupiah(buy)}/gr`
+  const sellFormatted = `Rp${formatRupiah(sell)}/gr`
+
+  const updatedAt = treasuryData?.data?.updated_at
+  let timeSection = ''
+  if (updatedAt) {
+    const date = new Date(updatedAt)
+    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
+    const dayName = days[date.getDay()]
+    const hours = date.getHours().toString().padStart(2, '0')
+    const minutes = date.getMinutes().toString().padStart(2, '0')
+    const seconds = date.getSeconds().toString().padStart(2, '0')
+    timeSection = `${dayName} ${hours}:${minutes}:${seconds} WIB`
+  }
+
+  // Header besar untuk promo
+  let headerSection = ''
+  if (promoStatus === 'ON') {
+    headerSection = `🎉🎉🎉 PROMO AKTIF! 🎉🎉🎉\n\n`
+  } else {
+    headerSection = `⚠️ PROMO TIDAK AKTIF ⚠️\n\n`
+  }
+
+  let marketSection = usdRate
+    ? `💱 USD Rp${formatRupiah(Math.round(usdRate))}`
+    : `💱 USD -`
+
+  if (xauUsd) {
+    marketSection += ` | XAU $${xauUsd.toFixed(2)}`
+  }
+
+  const calendarSection = formatEconomicCalendar(economicEvents)
+
+  const grams20M = calculateProfit(buy, sell, 20000000).totalGrams
+  const profit20M = calculateProfit(buy, sell, 20000000).profit
+  const grams30M = calculateProfit(buy, sell, 30000000).totalGrams
+  const profit30M = calculateProfit(buy, sell, 30000000).profit
+  const grams40M = calculateProfit(buy, sell, 40000000).totalGrams
+  const profit40M = calculateProfit(buy, sell, 40000000).profit
+  const grams50M = calculateProfit(buy, sell, 50000000).totalGrams
+  const profit50M = calculateProfit(buy, sell, 50000000).profit
+
+  const formatGrams = (g) => g.toFixed(4)
+
+  return `${headerSection}${timeSection} ${promoStatus === 'ON' ? '🟢 ON' : '🔴 OFF'}
+
+💰 Beli ${buyFormatted} | Jual ${sellFormatted}
+${marketSection}
+
+🎁 20jt→${formatGrams(grams20M)}gr (+Rp${formatRupiah(Math.round(profit20M))})
+🎁 30jt→${formatGrams(grams30M)}gr (+Rp${formatRupiah(Math.round(profit30M))})
+🎁 40jt→${formatGrams(grams40M)}gr (+Rp${formatRupiah(Math.round(profit40M))})
+🎁 50jt→${formatGrams(grams50M)}gr (+Rp${formatRupiah(Math.round(profit50M))})
+${calendarSection}
+⚡ Status promo berubah!
+🌐 Via website: https://ts.muhamadaliyudin.xyz/`
+}
+
 // 📌 Broadcast promo change dengan auto-PIN di grup
 async function broadcastPromoChange(promoStatus) {
   if (!sock || !isReady || subscriptions.size === 0) return
@@ -1290,14 +1364,13 @@ async function broadcastPromoChange(promoStatus) {
     const treasuryData = await fetchTreasury()
     const usdRate = cachedMarketData.usdIdr?.rate || null
 
-    // Format pesan promo change
-    const message = formatMessage(
+    // Format pesan promo change (FORMAT BERBEDA dari price broadcast!)
+    const message = formatPromoMessage(
+      promoStatus,
       treasuryData,
       usdRate,
       cachedMarketData.xauUsd,
-      null, // no price change
-      cachedMarketData.economicEvents,
-      promoStatus
+      cachedMarketData.economicEvents
     )
 
     const messageHash = getMessageHash(message)
@@ -1330,9 +1403,12 @@ async function broadcastPromoChange(promoStatus) {
 
         sentCount++
 
-        // 📌 Auto-PIN jika GRUP
+        // 📌 Auto-PIN jika GRUP (dengan 500ms delay untuk ensure message delivered)
         if (chatId.endsWith('@g.us')) {
           try {
+            await new Promise(r => setTimeout(r, 500)) // Wait for message to be fully sent
+
+            // PIN dengan format yang benar (directly pass the message key)
             await sock.sendMessage(chatId, {
               pin: sentMsg.key
             })
@@ -1340,6 +1416,21 @@ async function broadcastPromoChange(promoStatus) {
             pushLog(`📌 Pinned promo ${promoStatus} in group ${chatId.substring(0, 20)} (${sendDuration}ms)`)
           } catch (pinErr) {
             pushLog(`⚠️  Pin failed in ${chatId.substring(0, 20)}: ${pinErr.message}`)
+
+            // Try alternative format if first attempt fails
+            try {
+              await sock.sendMessage(chatId, {
+                pin: {
+                  chat: chatId,
+                  fromMe: true,
+                  id: sentMsg.key.id
+                }
+              })
+              pinnedCount++
+              pushLog(`📌 Pinned promo ${promoStatus} (alternative format) in ${chatId.substring(0, 20)}`)
+            } catch (altErr) {
+              pushLog(`⚠️  Alt pin also failed: ${altErr.message}`)
+            }
           }
         } else {
           pushLog(`✅ Sent promo ${promoStatus} to ${chatId.substring(0, 15)} (${sendDuration}ms)`)

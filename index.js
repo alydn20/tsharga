@@ -1309,6 +1309,28 @@ async function updatePromoStatus() {
   }
 }
 
+// 🔍 Helper: Check if bot is admin in a group
+async function isBotAdminInGroup(groupJid) {
+  try {
+    if (!sock || !groupJid.endsWith('@g.us')) return false
+
+    const groupMetadata = await sock.groupMetadata(groupJid)
+    const botNumber = sock.user.id.split(':')[0] + '@s.whatsapp.net'
+
+    const botParticipant = groupMetadata.participants.find(
+      p => p.id === botNumber
+    )
+
+    const isAdmin = botParticipant && (botParticipant.admin === 'admin' || botParticipant.admin === 'superadmin')
+
+    pushLog(`🔍 Bot admin check for ${groupJid.substring(0, 20)}: ${isAdmin ? 'YES' : 'NO'}`)
+    return isAdmin
+  } catch (err) {
+    pushLog(`⚠️  Failed to check admin status: ${err.message}`)
+    return false
+  }
+}
+
 // 🎁 Format pesan khusus untuk promo broadcast (ULTRA SIMPLE - hanya emoji + status)
 function formatPromoMessage(promoStatus) {
   // HANYA 🟢 ON atau 🔴 OFF
@@ -1355,32 +1377,30 @@ async function broadcastPromoChange(promoStatus) {
 
         // 📌 Auto-PIN jika GRUP (dengan 500ms delay untuk ensure message delivered)
         if (chatId.endsWith('@g.us')) {
-          try {
-            await new Promise(r => setTimeout(r, 500)) // Wait for message to be fully sent
+          // Check if bot is admin first
+          const isAdmin = await isBotAdminInGroup(chatId)
 
-            // PIN dengan format yang benar (directly pass the message key)
-            await sock.sendMessage(chatId, {
-              pin: sentMsg.key
-            })
-            pinnedCount++
-            pushLog(`📌 Pinned promo ${promoStatus} in group ${chatId.substring(0, 20)} (${sendDuration}ms)`)
-          } catch (pinErr) {
-            pushLog(`⚠️  Pin failed in ${chatId.substring(0, 20)}: ${pinErr.message}`)
-
-            // Try alternative format if first attempt fails
+          if (isAdmin) {
             try {
-              await sock.sendMessage(chatId, {
+              await new Promise(r => setTimeout(r, 500)) // Wait for message to be fully sent
+
+              // PIN dengan format yang benar untuk Baileys
+              const pinResult = await sock.sendMessage(chatId, {
                 pin: {
-                  chat: chatId,
-                  fromMe: true,
-                  id: sentMsg.key.id
+                  type: 1,           // 1 = pin message, 0 = unpin
+                  time: 86400,       // duration in seconds (24 hours)
+                  key: sentMsg.key
                 }
               })
+
               pinnedCount++
-              pushLog(`📌 Pinned promo ${promoStatus} (alternative format) in ${chatId.substring(0, 20)}`)
-            } catch (altErr) {
-              pushLog(`⚠️  Alt pin also failed: ${altErr.message}`)
+              pushLog(`📌 ✅ Pinned promo ${promoStatus} in group ${chatId.substring(0, 20)} (${sendDuration}ms, duration: 24h)`)
+            } catch (pinErr) {
+              pushLog(`⚠️  Pin failed in ${chatId.substring(0, 20)}: ${pinErr.message}`)
+              pushLog(`   Error details: ${pinErr.stack}`)
             }
+          } else {
+            pushLog(`⚠️  Cannot PIN: Bot is not admin in group ${chatId.substring(0, 20)}`)
           }
         } else {
           pushLog(`✅ Sent promo ${promoStatus} to ${chatId.substring(0, 15)} (${sendDuration}ms)`)
@@ -1962,12 +1982,29 @@ async function start() {
 
                 // 📌 Auto-PIN jika GRUP
                 if (sendTarget.endsWith('@g.us')) {
-                  try {
-                    await new Promise(r => setTimeout(r, 500))
-                    await sock.sendMessage(sendTarget, { pin: sentMsg.key })
-                    pushLog(`📌 Pinned initial promo status in group ${sendTarget.substring(0, 20)}`)
-                  } catch (pinErr) {
-                    pushLog(`⚠️  Initial pin failed: ${pinErr.message}`)
+                  // Check if bot is admin first
+                  const isAdmin = await isBotAdminInGroup(sendTarget)
+
+                  if (isAdmin) {
+                    try {
+                      await new Promise(r => setTimeout(r, 500))
+
+                      // Format PIN yang benar untuk Baileys (type: 1 = pin, time = duration)
+                      const pinResult = await sock.sendMessage(sendTarget, {
+                        pin: {
+                          type: 1,           // 1 = pin message, 0 = unpin
+                          time: 86400,       // duration in seconds (24 hours)
+                          key: sentMsg.key
+                        }
+                      })
+
+                      pushLog(`📌 ✅ Pinned initial promo status in group ${sendTarget.substring(0, 20)} (duration: 24h)`)
+                    } catch (pinErr) {
+                      pushLog(`⚠️  Initial pin failed: ${pinErr.message}`)
+                      pushLog(`   Error stack: ${pinErr.stack}`)
+                    }
+                  } else {
+                    pushLog(`⚠️  Cannot PIN: Bot is not admin in group ${sendTarget.substring(0, 20)}`)
                   }
                 }
               } catch (err) {
